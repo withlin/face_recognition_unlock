@@ -7,6 +7,12 @@
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <!-- TensorFlow.js and MediaPipe Face Detection -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.15.0/dist/tf-backend-webgl.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@1.0.5/dist/face-landmarks-detection.js"></script>
 </head>
 <body>
     <div class="container">
@@ -15,8 +21,19 @@
                 <div class="logo">
                     <i class="fas fa-user-shield"></i>
                 </div>
-                <h1>人脸识别解锁</h1>
-                <p class="subtitle">请将面部对准摄像头进行身份验证</p>
+                <h1 id="mainTitle">人脸识别解锁</h1>
+                <p class="subtitle" id="subtitle">请选择操作模式</p>
+            </div>
+            
+            <div class="mode-selector" id="modeSelector">
+                <button class="mode-btn active" id="enrollBtn" data-mode="enroll">
+                    <i class="fas fa-user-plus"></i>
+                    <span>人脸录入</span>
+                </button>
+                <button class="mode-btn" id="unlockBtn" data-mode="unlock">
+                    <i class="fas fa-unlock-alt"></i>
+                    <span>人脸解锁</span>
+                </button>
             </div>
             
             <div class="camera-section">
@@ -33,14 +50,39 @@
                 </div>
             </div>
             
+            <div class="enroll-steps" id="enrollSteps" style="display: none;">
+                <div class="step-indicator">
+                    <div class="step active" data-step="1">
+                        <span class="step-number">1</span>
+                        <span class="step-text">正面拍摄</span>
+                    </div>
+                    <div class="step" data-step="2">
+                        <span class="step-number">2</span>
+                        <span class="step-text">左转头部</span>
+                    </div>
+                    <div class="step" data-step="3">
+                        <span class="step-number">3</span>
+                        <span class="step-text">右转头部</span>
+                    </div>
+                    <div class="step" data-step="4">
+                        <span class="step-number">4</span>
+                        <span class="step-text">眨眼确认</span>
+                    </div>
+                </div>
+            </div>
+            
             <div class="controls">
                 <button id="startBtn" class="btn btn-primary">
                     <i class="fas fa-play"></i>
-                    开始识别
+                    <span id="startBtnText">开始录入</span>
                 </button>
                 <button id="resetBtn" class="btn btn-secondary" style="display: none;">
                     <i class="fas fa-redo"></i>
                     重新开始
+                </button>
+                <button id="clearDataBtn" class="btn btn-danger" style="display: none;">
+                    <i class="fas fa-trash"></i>
+                    清除数据
                 </button>
             </div>
             

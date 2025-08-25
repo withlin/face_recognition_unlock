@@ -1,10 +1,48 @@
-class FaceRecognitionUnlock {
+class FaceRecognitionSystem {
     constructor() {
+        this.initializeElements();
+        this.currentMode = 'enroll'; // 'enroll' or 'unlock'
+        this.currentStep = 1;
+        this.maxSteps = 4;
+        this.isProcessing = false;
+        this.stream = null;
+        this.enrolledFaces = [];
+        this.faceDescriptors = [];
+        
+        // MediaPipe Face Detection
+        this.faceDetector = null;
+        this.isModelLoaded = false;
+        this.lastEyeAspectRatio = null;
+        this.blinkCounter = 0;
+        this.frameCounter = 0;
+        this.earHistory = [];
+        this.isBlinking = false;
+        this.blinkStartFrame = 0;
+        this.framesSinceLastBlink = 0;
+        this.lastBlinkTime = 0;
+        this.headPoseHistory = [];
+        this.livenessScore = 0;
+        
+        // 活体检测相关
+        this.livenessChecks = {
+            blinkDetected: false,
+            headMovement: false,
+            faceStability: 0
+        };
+        
+        this.storageManager = new LocalStorageManager();
+        this.currentUser = null;
+        
+        this.init();
+    }
+    
+    initializeElements() {
         this.video = document.getElementById('video');
         this.canvas = document.getElementById('canvas');
         this.ctx = this.canvas.getContext('2d');
         this.startBtn = document.getElementById('startBtn');
         this.resetBtn = document.getElementById('resetBtn');
+        this.clearDataBtn = document.getElementById('clearDataBtn');
         this.statusIndicator = document.getElementById('statusIndicator');
         this.resultSection = document.getElementById('resultSection');
         this.resultIcon = document.getElementById('resultIcon');
@@ -12,66 +50,158 @@ class FaceRecognitionUnlock {
         this.resultMessage = document.getElementById('resultMessage');
         this.cameraContainer = document.querySelector('.camera-container');
         this.faceFrame = document.querySelector('.face-frame');
-        
-        this.isScanning = false;
-        this.model = null;
-        this.stream = null;
-        this.detectionInterval = null;
-        this.faceDetectedCount = 0;
-        this.requiredDetections = 10; // 需要连续检测到人脸的次数
-        
-        this.init();
+        this.modeSelector = document.getElementById('modeSelector');
+        this.enrollBtn = document.getElementById('enrollBtn');
+        this.unlockBtn = document.getElementById('unlockBtn');
+        this.enrollSteps = document.getElementById('enrollSteps');
+        this.mainTitle = document.getElementById('mainTitle');
+        this.subtitle = document.getElementById('subtitle');
+        this.startBtnText = document.getElementById('startBtnText');
     }
     
     async init() {
-        this.bindEvents();
-        await this.loadModel();
-        this.updateStatus('模型加载完成，点击开始识别', 'fas fa-check-circle');
+        await this.initializeSystem();
     }
-    
-    bindEvents() {
-        this.startBtn.addEventListener('click', () => this.startRecognition());
-        this.resetBtn.addEventListener('click', () => this.reset());
-    }
-    
-    async loadModel() {
+
+    async initializeSystem() {
         try {
-            this.updateStatus('正在加载AI模型...', 'fas fa-spinner fa-spin');
-            // 使用简化的人脸检测方案
-            this.model = {
-                loaded: true,
-                // 模拟人脸检测功能
-                estimateFaces: async (config) => {
-                    // 简单的模拟检测逻辑
-                    const video = config.input;
-                    if (video && video.videoWidth > 0) {
-                        // 随机模拟人脸检测结果
-                        const hasface = Math.random() > 0.3; // 70%概率检测到人脸
-                        return hasface ? [{ confidence: 0.9 }] : [];
-                    }
-                    return [];
+            // Load MediaPipe Face Detection model
+            await this.loadFaceDetectionModel();
+            
+            // Load user data from localStorage
+            this.loadUserData();
+            
+            this.bindEvents();
+            this.checkStoredData();
+            this.updateUI();
+        } catch (error) {
+            console.error('系统初始化失败:', error);
+            this.updateStatus('系统初始化失败', 'fas fa-exclamation-triangle', 'error');
+        }
+    }
+
+    async loadFaceDetectionModel() {
+        try {
+            this.updateStatus('正在加载人脸检测模型...', 'fas fa-spinner fa-spin');
+            
+            // Load MediaPipe Face Landmarks Detection model
+            this.faceDetector = await faceLandmarksDetection.load(
+                faceLandmarksDetection.SupportedPackages.mediaPipeFaceMesh,
+                {
+                    runtime: 'mediapipe',
+                    solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619',
+                    refineLandmarks: true,
+                    maxFaces: 1
                 }
-            };
+            );
+            
+            this.isModelLoaded = true;
+            this.updateStatus('人脸检测模型加载完成', 'fas fa-check-circle', 'success');
+            console.log('MediaPipe Face Detection模型加载成功');
         } catch (error) {
             console.error('模型加载失败:', error);
-            this.updateStatus('模型加载失败，请刷新重试', 'fas fa-exclamation-triangle', 'error');
+            this.updateStatus('模型加载失败，请刷新页面重试', 'fas fa-exclamation-triangle', 'error');
+            throw error;
+        }
+    }
+
+    loadUserData() {
+        try {
+            const userData = this.storageManager.getCurrentUser();
+            if (userData) {
+                this.currentUser = userData;
+                console.log('用户数据加载成功');
+            }
+        } catch (error) {
+            console.error('用户数据加载失败:', error);
         }
     }
     
-    async startRecognition() {
-        if (this.isScanning) return;
+    bindEvents() {
+        this.startBtn.addEventListener('click', () => this.startProcess());
+        this.resetBtn.addEventListener('click', () => this.reset());
+        this.clearDataBtn.addEventListener('click', () => this.clearStoredData());
+        this.enrollBtn.addEventListener('click', () => this.switchMode('enroll'));
+        this.unlockBtn.addEventListener('click', () => this.switchMode('unlock'));
+    }
+    
+    switchMode(mode) {
+        if (this.isProcessing) return;
+        
+        this.currentMode = mode;
+        this.currentStep = 1;
+        
+        // 更新按钮状态
+        this.enrollBtn.classList.toggle('active', mode === 'enroll');
+        this.unlockBtn.classList.toggle('active', mode === 'unlock');
+        
+        this.updateUI();
+        this.reset();
+    }
+    
+    updateUI() {
+        if (this.currentMode === 'enroll') {
+            this.mainTitle.textContent = '人脸录入';
+            this.subtitle.textContent = '请按照步骤完成人脸信息录入';
+            this.startBtnText.textContent = '开始录入';
+            this.enrollSteps.style.display = 'block';
+        } else {
+            this.mainTitle.textContent = '人脸解锁';
+            this.subtitle.textContent = '请将面部对准摄像头进行身份验证';
+            this.startBtnText.textContent = '开始解锁';
+            this.enrollSteps.style.display = 'none';
+        }
+        
+        this.updateStepIndicator();
+    }
+    
+    updateStepIndicator() {
+        const steps = document.querySelectorAll('.step');
+        steps.forEach((step, index) => {
+            const stepNumber = index + 1;
+            step.classList.remove('active', 'completed');
+            
+            if (stepNumber < this.currentStep) {
+                step.classList.add('completed');
+            } else if (stepNumber === this.currentStep) {
+                step.classList.add('active');
+            }
+        });
+    }
+    
+    checkStoredData() {
+        const storedFaces = localStorage.getItem('enrolledFaces');
+        if (storedFaces) {
+            this.enrolledFaces = JSON.parse(storedFaces);
+            this.clearDataBtn.style.display = 'inline-flex';
+        }
+    }
+    
+    async startProcess() {
+        if (this.isProcessing) return;
+        
+        if (this.currentMode === 'unlock' && this.enrolledFaces.length === 0) {
+            this.showError('未找到录入数据', '请先录入人脸信息');
+            return;
+        }
         
         try {
-            this.isScanning = true;
+            this.isProcessing = true;
             this.startBtn.style.display = 'none';
             this.resetBtn.style.display = 'inline-flex';
             this.resultSection.style.display = 'none';
+            this.modeSelector.style.display = 'none';
             
             await this.startCamera();
-            this.startDetection();
+            
+            if (this.currentMode === 'enroll') {
+                this.startEnrollment();
+            } else {
+                this.startUnlock();
+            }
             
         } catch (error) {
-            console.error('启动识别失败:', error);
+            console.error('启动失败:', error);
             this.showError('摄像头访问失败', '请检查摄像头权限设置');
             this.reset();
         }
@@ -102,80 +232,693 @@ class FaceRecognitionUnlock {
         });
     }
     
-    startDetection() {
-        this.updateStatus('正在扫描人脸...', 'fas fa-search', 'scanning');
-        this.faceDetectedCount = 0;
+    startEnrollment() {
+        this.updateStatus(this.getStepInstruction(), 'fas fa-user-plus', 'scanning');
+        this.enrollmentInterval = setInterval(async () => {
+            await this.processEnrollmentStep();
+        }, 100);
         
-        this.detectionInterval = setInterval(async () => {
-            if (!this.model || !this.video.videoWidth) return;
-            
-            try {
-                const predictions = await this.model.estimateFaces({
-                    input: this.video
-                });
-                
-                if (predictions && predictions.length > 0) {
-                    this.faceDetectedCount++;
-                    this.updateStatus(`检测到人脸 (${this.faceDetectedCount}/${this.requiredDetections})`, 'fas fa-user-check', 'scanning');
-                    
-                    // 模拟人脸识别验证过程
-                    if (this.faceDetectedCount >= this.requiredDetections) {
-                        this.completeFaceRecognition();
-                    }
-                } else {
-                    this.faceDetectedCount = Math.max(0, this.faceDetectedCount - 1);
-                    this.updateStatus('请将面部对准摄像头', 'fas fa-search', 'scanning');
-                }
-                
-            } catch (error) {
-                console.error('人脸检测错误:', error);
+        // 步骤超时
+        this.stepTimeout = setTimeout(() => {
+            if (this.isProcessing) {
+                this.nextEnrollmentStep();
             }
+        }, 5000);
+    }
+    
+    getStepInstruction() {
+        const instructions = {
+            1: '请保持正面朝向摄像头',
+            2: '请缓慢向左转动头部',
+            3: '请缓慢向右转动头部',
+            4: '请眨眼确认身份'
+        };
+        return instructions[this.currentStep] || '录入中...';
+    }
+    
+    async processEnrollmentStep() {
+        if (!this.video.videoWidth) return;
+        
+        // 捕获当前帧
+        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        
+        // 模拟人脸检测和特征提取
+        const faceDetected = await this.detectFace();
+        
+        if (faceDetected) {
+            await this.captureFaceData();
+            
+            // 检查是否完成当前步骤
+            if (this.isStepCompleted()) {
+                this.nextEnrollmentStep();
+            }
+        }
+    }
+    
+    async detectFace() {
+        if (!this.isModelLoaded || !this.faceDetector) {
+            return null;
+        }
+
+        try {
+            // 使用MediaPipe进行真实人脸检测
+            const predictions = await this.faceDetector.estimateFaces({
+                input: this.video,
+                returnTensors: false,
+                flipHorizontal: false,
+                predictIrises: true
+            });
+            
+            if (predictions && predictions.length > 0) {
+                const face = predictions[0];
+                
+                // 计算眼部纵横比用于眨眼检测
+                const eyeAspectRatio = this.calculateEyeAspectRatio(face.keypoints);
+                this.detectBlink(eyeAspectRatio);
+                
+                return {
+                    confidence: face.faceInViewConfidence || 0.9,
+                    landmarks: face.keypoints,
+                    boundingBox: face.box,
+                    mesh: face.scaledMesh,
+                    eyeAspectRatio: eyeAspectRatio
+                };
+            }
+            
+            return null;
+        } catch (error) {
+            console.error('人脸检测错误:', error);
+            return null;
+        }
+    }
+
+    calculateEyeAspectRatio(keypoints) {
+        if (!keypoints || keypoints.length < 468) {
+            return 0;
+        }
+        
+        // 计算双眼的平均纵横比
+        const leftEAR = this.getEyeAspectRatio(keypoints, 'left');
+        const rightEAR = this.getEyeAspectRatio(keypoints, 'right');
+        
+        return (leftEAR + rightEAR) / 2;
+    }
+
+    getEyeAspectRatio(keypoints, eye) {
+        // MediaPipe 468点模型的眼部关键点索引
+        let eyePoints;
+        
+        if (eye === 'left') {
+            // 左眼关键点 (从用户视角)
+            eyePoints = {
+                outer: keypoints[33],   // 外眼角
+                inner: keypoints[133],  // 内眼角
+                top1: keypoints[159],   // 上眼睑点1
+                top2: keypoints[158],   // 上眼睑点2
+                bottom1: keypoints[145], // 下眼睑点1
+                bottom2: keypoints[153]  // 下眼睑点2
+            };
+        } else {
+            // 右眼关键点 (从用户视角)
+            eyePoints = {
+                outer: keypoints[362],  // 外眼角
+                inner: keypoints[263],  // 内眼角
+                top1: keypoints[386],   // 上眼睑点1
+                top2: keypoints[385],   // 上眼睑点2
+                bottom1: keypoints[374], // 下眼睑点1
+                bottom2: keypoints[380]  // 下眼睑点2
+            };
+        }
+        
+        // 计算眼睛纵横比: EAR = (|p2-p6| + |p3-p5|) / (2 * |p1-p4|)
+        const vertical1 = this.euclideanDistance(eyePoints.top1, eyePoints.bottom1);
+        const vertical2 = this.euclideanDistance(eyePoints.top2, eyePoints.bottom2);
+        const horizontal = this.euclideanDistance(eyePoints.outer, eyePoints.inner);
+        
+        if (horizontal === 0) return 0;
+        
+        return (vertical1 + vertical2) / (2 * horizontal);
+    }
+    
+    euclideanDistance(point1, point2) {
+        if (!point1 || !point2) return 0;
+        return Math.sqrt(
+            Math.pow(point1.x - point2.x, 2) + 
+            Math.pow(point1.y - point2.y, 2)
+        );
+    }
+
+    detectBlink(currentEyeAspectRatio) {
+        // 更新EAR历史记录
+        if (!this.earHistory) {
+            this.earHistory = [];
+        }
+        this.earHistory.push(currentEyeAspectRatio);
+        if (this.earHistory.length > 10) {
+            this.earHistory.shift();
+        }
+        
+        // 动态阈值计算
+        const avgHistoryEAR = this.earHistory.reduce((sum, ear) => sum + ear, 0) / this.earHistory.length;
+        const blinkThreshold = Math.min(0.25, avgHistoryEAR * 0.7); // 动态阈值
+        
+        // 检测眨眼
+        if (currentEyeAspectRatio < blinkThreshold) {
+            if (!this.isBlinking && this.framesSinceLastBlink > 5) {
+                this.isBlinking = true;
+                this.blinkStartFrame = this.frameCounter;
+            }
+            this.frameCounter += 1;
+        } else if (currentEyeAspectRatio > blinkThreshold * 1.2) {
+            if (this.isBlinking && this.frameCounter >= 2) {
+                const blinkDuration = this.frameCounter;
+                // 验证眨眼持续时间（防止误检测）
+                if (blinkDuration >= 2 && blinkDuration <= 15) {
+                    this.blinkCounter += 1;
+                    this.livenessChecks.blinkDetected = true;
+                    this.framesSinceLastBlink = 0;
+                    this.lastBlinkTime = Date.now();
+                    console.log('检测到有效眨眼，总计:', this.blinkCounter, '持续帧数:', blinkDuration);
+                }
+                this.isBlinking = false;
+            }
+            this.frameCounter = 0;
+        }
+        
+        this.framesSinceLastBlink++;
+        this.lastEyeAspectRatio = currentEyeAspectRatio;
+    }
+    
+    isSkinColor(r, g, b) {
+        // 简化的肤色检测算法
+        return r > 95 && g > 40 && b > 20 && 
+               r > g && r > b && 
+               r - g > 15 && 
+               Math.abs(r - g) > 15;
+    }
+    
+    async captureFaceData() {
+        // 检测人脸并提取特征
+        const detectedFace = await this.detectFace();
+        if (!detectedFace) return;
+        
+        const features = this.extractFaceFeatures(detectedFace);
+        if (!features) return;
+        
+        const faceData = {
+            step: this.currentStep,
+            timestamp: Date.now(),
+            features: features
+        };
+        
+        if (!this.faceDescriptors[this.currentStep - 1]) {
+            this.faceDescriptors[this.currentStep - 1] = [];
+        }
+        this.faceDescriptors[this.currentStep - 1].push(faceData);
+    }
+    
+    extractFaceFeatures(faceData) {
+        if (!faceData || !faceData.landmarks) {
+            return null;
+        }
+        
+        try {
+            const landmarks = faceData.landmarks;
+            const features = [];
+            
+            // 提取关键面部特征点的相对位置
+            const faceCenter = this.calculateFaceCenter(landmarks);
+            
+            // 重要面部特征点索引（MediaPipe 468点模型）
+            const keyPoints = {
+                leftEye: [33, 7, 163, 144, 145, 153],
+                rightEye: [362, 382, 381, 380, 374, 373],
+                nose: [1, 2, 5, 4, 6, 19, 20, 94, 125],
+                mouth: [61, 84, 17, 314, 405, 320, 307, 375, 321, 308],
+                jawline: [172, 136, 150, 149, 176, 148, 152, 377, 400, 378, 379, 365, 397, 288, 361, 323]
+            };
+            
+            // 计算各个特征区域的几何特征
+            Object.keys(keyPoints).forEach(region => {
+                const regionFeatures = this.calculateRegionFeatures(landmarks, keyPoints[region], faceCenter);
+                features.push(...regionFeatures);
+            });
+            
+            // 计算面部比例特征
+            const proportionFeatures = this.calculateFaceProportions(landmarks);
+            features.push(...proportionFeatures);
+            
+            // 归一化特征向量
+            return this.normalizeFeatures(features);
+        } catch (error) {
+            console.error('特征提取错误:', error);
+            return null;
+        }
+    }
+
+    calculateFaceCenter(landmarks) {
+        let sumX = 0, sumY = 0;
+        landmarks.forEach(point => {
+            sumX += point.x;
+            sumY += point.y;
+        });
+        return {
+            x: sumX / landmarks.length,
+            y: sumY / landmarks.length
+        };
+    }
+
+    calculateRegionFeatures(landmarks, indices, faceCenter) {
+        const features = [];
+        
+        // 计算区域中心点
+        let regionCenterX = 0, regionCenterY = 0;
+        indices.forEach(idx => {
+            regionCenterX += landmarks[idx].x;
+            regionCenterY += landmarks[idx].y;
+        });
+        regionCenterX /= indices.length;
+        regionCenterY /= indices.length;
+        
+        // 相对于面部中心的位置
+        features.push((regionCenterX - faceCenter.x) / 100);
+        features.push((regionCenterY - faceCenter.y) / 100);
+        
+        // 区域内点的分散度
+        let variance = 0;
+        indices.forEach(idx => {
+            const dx = landmarks[idx].x - regionCenterX;
+            const dy = landmarks[idx].y - regionCenterY;
+            variance += dx * dx + dy * dy;
+        });
+        features.push(Math.sqrt(variance / indices.length) / 10);
+        
+        return features;
+    }
+
+    calculateFaceProportions(landmarks) {
+        const features = [];
+        
+        // 眼间距
+        const leftEyeCenter = landmarks[33];
+        const rightEyeCenter = landmarks[362];
+        const eyeDistance = Math.sqrt(
+            Math.pow(rightEyeCenter.x - leftEyeCenter.x, 2) + 
+            Math.pow(rightEyeCenter.y - leftEyeCenter.y, 2)
+        );
+        
+        // 鼻子长度
+        const noseTip = landmarks[1];
+        const noseBridge = landmarks[6];
+        const noseLength = Math.sqrt(
+            Math.pow(noseTip.x - noseBridge.x, 2) + 
+            Math.pow(noseTip.y - noseBridge.y, 2)
+        );
+        
+        // 嘴巴宽度
+        const leftMouth = landmarks[61];
+        const rightMouth = landmarks[291];
+        const mouthWidth = Math.sqrt(
+            Math.pow(rightMouth.x - leftMouth.x, 2) + 
+            Math.pow(rightMouth.y - leftMouth.y, 2)
+        );
+        
+        // 面部高度
+        const forehead = landmarks[10];
+        const chin = landmarks[152];
+        const faceHeight = Math.sqrt(
+            Math.pow(chin.x - forehead.x, 2) + 
+            Math.pow(chin.y - forehead.y, 2)
+        );
+        
+        // 计算比例特征
+        features.push(eyeDistance / faceHeight);
+        features.push(noseLength / faceHeight);
+        features.push(mouthWidth / faceHeight);
+        features.push(eyeDistance / mouthWidth);
+        
+        return features;
+    }
+
+    normalizeFeatures(features) {
+        // 简单的特征归一化
+        const mean = features.reduce((sum, val) => sum + val, 0) / features.length;
+        const variance = features.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / features.length;
+        const stdDev = Math.sqrt(variance);
+        
+        if (stdDev === 0) return features;
+        
+        return features.map(val => (val - mean) / stdDev);
+    }
+    
+    isStepCompleted() {
+        const requiredSamples = 10;
+        return this.faceDescriptors[this.currentStep - 1] && 
+               this.faceDescriptors[this.currentStep - 1].length >= requiredSamples;
+    }
+    
+    nextEnrollmentStep() {
+        clearInterval(this.enrollmentInterval);
+        clearTimeout(this.stepTimeout);
+        
+        if (this.currentStep < this.maxSteps) {
+            this.currentStep++;
+            this.updateStepIndicator();
+            this.startEnrollment();
+        } else {
+            this.completeEnrollment();
+        }
+    }
+    
+    completeEnrollment() {
+        // 保存录入的人脸数据
+        const enrollmentData = {
+            id: Date.now(),
+            timestamp: new Date().toISOString(),
+            descriptors: this.faceDescriptors
+        };
+        
+        this.enrolledFaces.push(enrollmentData);
+        localStorage.setItem('enrolledFaces', JSON.stringify(this.enrolledFaces));
+        
+        // 如果有当前用户，保存到用户数据中
+        if (this.currentUser) {
+            for (let i = 0; i < this.faceDescriptors.length; i++) {
+                const stepDescriptors = this.faceDescriptors[i];
+                if (stepDescriptors) {
+                    for (const descriptor of stepDescriptors) {
+                        this.storageManager.enrollFace(this.currentUser.id, descriptor.features, i + 1);
+                    }
+                }
+            }
+        }
+        
+        this.showSuccess('录入成功', '人脸信息已成功录入系统');
+        this.clearDataBtn.style.display = 'inline-flex';
+        
+        setTimeout(() => {
+            this.reset();
+            this.switchMode('unlock');
+        }, 3000);
+    }
+    
+    startUnlock() {
+        this.updateStatus('正在扫描人脸...', 'fas fa-search', 'scanning');
+        this.livenessChecks = { blinkDetected: false, headMovement: false, faceStability: 0 };
+        
+        this.unlockInterval = setInterval(async () => {
+            await this.processUnlock();
         }, 200);
         
-        // 设置超时
+        // 解锁超时
         setTimeout(() => {
-            if (this.isScanning && this.faceDetectedCount < this.requiredDetections) {
-                this.showError('识别超时', '未能在规定时间内完成人脸识别');
+            if (this.isProcessing) {
+                this.showError('解锁超时', '未能在规定时间内完成身份验证');
                 this.reset();
             }
-        }, 30000); // 30秒超时
+        }, 15000);
     }
     
-    completeFaceRecognition() {
-        clearInterval(this.detectionInterval);
-        this.isScanning = false;
+    async processUnlock() {
+        if (!this.video.videoWidth) return;
         
-        // 模拟身份验证过程
-        this.updateStatus('正在验证身份...', 'fas fa-spinner fa-spin', 'scanning');
+        // 捕获当前帧
+        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
         
-        setTimeout(() => {
-            // 随机决定验证结果（实际应用中这里会是真实的人脸比对逻辑）
-            const isAuthenticated = Math.random() > 0.2; // 80%成功率
+        // 检测人脸
+        const faceDetected = await this.detectFace();
+        
+        if (faceDetected) {
+            this.livenessChecks.faceStability++;
             
-            if (isAuthenticated) {
-                this.showSuccess();
-            } else {
-                this.showError('身份验证失败', '未能识别您的身份，请重试');
-                this.reset();
+            // 活体检测
+            if (this.performLivenessCheck(faceDetected)) {
+                // 人脸比对
+                const currentFeatures = this.extractFaceFeatures(faceDetected);
+                if (currentFeatures) {
+                    const matchResult = this.compareFaces(currentFeatures);
+                
+                    if (matchResult.isMatch && matchResult.confidence > 0.7) {
+                        this.completeUnlock(true, matchResult.confidence);
+                    } else if (this.livenessChecks.faceStability > 50) {
+                        this.completeUnlock(false, matchResult.confidence);
+                    }
+                }
             }
-        }, 2000);
+        } else {
+            this.livenessChecks.faceStability = Math.max(0, this.livenessChecks.faceStability - 2);
+        }
+        
+        this.updateStatus(`正在验证身份... (${Math.min(100, this.livenessChecks.faceStability * 2)}%)`, 'fas fa-search', 'scanning');
     }
     
-    showSuccess() {
-        this.updateStatus('解锁成功！', 'fas fa-check-circle', 'success');
+    performLivenessCheck(faceData) {
+        if (!faceData || !faceData.landmarks) {
+            return false;
+        }
+        
+        // 更新帧计数器
+        this.frameCounter++;
+        
+        // 检测头部姿态变化
+        const headPose = this.calculateHeadPose(faceData.landmarks);
+        this.updateHeadPoseHistory(headPose);
+        
+        // 检测眨眼
+        const eyeAspectRatio = this.calculateEyeAspectRatio(faceData.landmarks);
+        this.detectBlink(eyeAspectRatio);
+        
+        // 计算活体检测分数
+        this.livenessScore = this.calculateLivenessScore();
+        
+        // 更新活体检测状态
+        this.updateLivenessChecks();
+        
+        console.log('活体检测分数:', this.livenessScore.toFixed(2));
+        return this.livenessScore > 0.7;
+    }
+    
+    calculateHeadPose(landmarks) {
+        // 使用关键点计算头部姿态
+        const noseTip = landmarks[1];
+        const leftEye = landmarks[33];
+        const rightEye = landmarks[362];
+        const chin = landmarks[152];
+        
+        // 计算头部倾斜角度
+        const eyeCenter = {
+            x: (leftEye.x + rightEye.x) / 2,
+            y: (leftEye.y + rightEye.y) / 2
+        };
+        
+        const roll = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x) * 180 / Math.PI;
+        const yaw = Math.atan2(noseTip.x - eyeCenter.x, eyeCenter.y - noseTip.y) * 180 / Math.PI;
+        const pitch = Math.atan2(chin.y - eyeCenter.y, Math.abs(chin.x - eyeCenter.x)) * 180 / Math.PI;
+        
+        return { roll, yaw, pitch };
+    }
+    
+    updateHeadPoseHistory(headPose) {
+        this.headPoseHistory.push(headPose);
+        if (this.headPoseHistory.length > 30) {
+            this.headPoseHistory.shift();
+        }
+    }
+    
+    calculateLivenessScore() {
+        let score = 0;
+        
+        // 眨眼检测分数 (40%)
+        const blinkScore = Math.min(this.blinkCounter / 3, 1) * 0.4;
+        score += blinkScore;
+        
+        // 头部姿态变化分数 (35%)
+        const poseScore = this.calculatePoseVariationScore() * 0.35;
+        score += poseScore;
+        
+        // 面部稳定性分数 (25%)
+        const stabilityScore = Math.min(this.frameCounter / 60, 1) * 0.25;
+        score += stabilityScore;
+        
+        return Math.min(score, 1);
+    }
+    
+    calculatePoseVariationScore() {
+        if (this.headPoseHistory.length < 10) {
+            return 0;
+        }
+        
+        // 计算姿态变化的标准差
+        const rollVariance = this.calculateVariance(this.headPoseHistory.map(p => p.roll));
+        const yawVariance = this.calculateVariance(this.headPoseHistory.map(p => p.yaw));
+        const pitchVariance = this.calculateVariance(this.headPoseHistory.map(p => p.pitch));
+        
+        // 适度的变化表明是真人
+        const totalVariance = rollVariance + yawVariance + pitchVariance;
+        return Math.min(totalVariance / 100, 1); // 归一化到0-1
+    }
+    
+    calculateVariance(values) {
+        const mean = values.reduce((sum, val) => sum + val, 0) / values.length;
+        const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+        return Math.sqrt(variance);
+    }
+    
+    updateLivenessChecks() {
+        this.livenessChecks.blinkDetected = this.blinkCounter > 0;
+        this.livenessChecks.headMovement = this.headPoseHistory.length > 5;
+        this.livenessChecks.faceStability = this.frameCounter;
+    }
+    
+    calculateAverageBrightness(imageData) {
+        const data = imageData.data;
+        let totalBrightness = 0;
+        
+        for (let i = 0; i < data.length; i += 4) {
+            const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+            totalBrightness += brightness;
+        }
+        
+        return totalBrightness / (data.length / 4);
+    }
+    
+    compareFaces(currentFeatures) {
+        // 如果有当前用户，使用storageManager进行验证
+        if (this.currentUser) {
+            const result = this.storageManager.verifyFace(this.currentUser.id, currentFeatures);
+            return {
+                isMatch: result.success,
+                confidence: result.confidence || 0
+            };
+        }
+        
+        // 兼容旧的本地存储方式
+        if (this.enrolledFaces.length === 0) {
+            return { isMatch: false, confidence: 0 };
+        }
+        
+        let bestMatch = { isMatch: false, confidence: 0 };
+        
+        for (const enrolledFace of this.enrolledFaces) {
+            for (const stepDescriptors of enrolledFace.descriptors) {
+                if (stepDescriptors) {
+                    for (const descriptor of stepDescriptors) {
+                        const similarity = this.calculateAdvancedSimilarity(currentFeatures, descriptor.features);
+                        if (similarity > bestMatch.confidence) {
+                            bestMatch = {
+                                isMatch: similarity > 0.75,
+                                confidence: similarity
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        
+        return bestMatch;
+    }
+    
+    calculateAdvancedSimilarity(features1, features2) {
+        if (!features1 || !features2 || features1.length !== features2.length) {
+            return 0;
+        }
+        
+        // 使用多种相似度度量的加权组合
+        const cosineSim = this.calculateCosineSimilarity(features1, features2);
+        const euclideanSim = this.calculateEuclideanSimilarity(features1, features2);
+        const pearsonSim = this.calculatePearsonSimilarity(features1, features2);
+        
+        // 加权平均（余弦相似度权重最高）
+        return 0.5 * cosineSim + 0.3 * euclideanSim + 0.2 * pearsonSim;
+    }
+    
+    calculateCosineSimilarity(features1, features2) {
+        let dotProduct = 0;
+        let norm1 = 0;
+        let norm2 = 0;
+        
+        for (let i = 0; i < features1.length; i++) {
+            dotProduct += features1[i] * features2[i];
+            norm1 += features1[i] * features1[i];
+            norm2 += features2[i] * features2[i];
+        }
+        
+        if (norm1 === 0 || norm2 === 0) {
+            return 0;
+        }
+        
+        return Math.max(0, dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2)));
+    }
+    
+    calculateEuclideanSimilarity(features1, features2) {
+        let sumSquaredDiff = 0;
+        
+        for (let i = 0; i < features1.length; i++) {
+            const diff = features1[i] - features2[i];
+            sumSquaredDiff += diff * diff;
+        }
+        
+        const euclideanDistance = Math.sqrt(sumSquaredDiff);
+        // 转换为相似度（距离越小，相似度越高）
+        return Math.max(0, 1 / (1 + euclideanDistance));
+    }
+    
+    calculatePearsonSimilarity(features1, features2) {
+        const n = features1.length;
+        
+        // 计算均值
+        const mean1 = features1.reduce((sum, val) => sum + val, 0) / n;
+        const mean2 = features2.reduce((sum, val) => sum + val, 0) / n;
+        
+        let numerator = 0;
+        let sumSq1 = 0;
+        let sumSq2 = 0;
+        
+        for (let i = 0; i < n; i++) {
+            const diff1 = features1[i] - mean1;
+            const diff2 = features2[i] - mean2;
+            
+            numerator += diff1 * diff2;
+            sumSq1 += diff1 * diff1;
+            sumSq2 += diff2 * diff2;
+        }
+        
+        const denominator = Math.sqrt(sumSq1 * sumSq2);
+        
+        if (denominator === 0) {
+            return 0;
+        }
+        
+        const correlation = numerator / denominator;
+        // 将相关系数转换为0-1范围的相似度
+        return Math.max(0, (correlation + 1) / 2);
+    }
+    
+    completeUnlock(success, confidence) {
+        clearInterval(this.unlockInterval);
+        this.isProcessing = false;
+        
+        if (success) {
+            this.showSuccess('解锁成功', `身份验证通过 (置信度: ${(confidence * 100).toFixed(1)}%)`);
+            this.playSuccessSound();
+        } else {
+            this.showError('解锁失败', '身份验证失败，请重试');
+        }
+        
+        setTimeout(() => {
+            this.reset();
+        }, 3000);
+    }
+    
+    showSuccess(title, message) {
+        this.updateStatus('验证成功！', 'fas fa-check-circle', 'success');
         this.resultSection.style.display = 'block';
         this.resultSection.className = 'result-section success';
         this.resultIcon.innerHTML = '<i class="fas fa-check-circle"></i>';
-        this.resultTitle.textContent = '解锁成功';
-        this.resultMessage.textContent = '身份验证通过，欢迎回来！';
-        
-        // 添加成功音效（如果需要）
-        this.playSuccessSound();
-        
-        // 自动重置
-        setTimeout(() => {
-            this.reset();
-        }, 5000);
+        this.resultTitle.textContent = title;
+        this.resultMessage.textContent = message;
     }
     
     showError(title, message) {
@@ -193,13 +936,10 @@ class FaceRecognitionUnlock {
         
         statusIcon.className = iconClass;
         statusText.textContent = text;
-        
-        // 更新状态样式
         this.statusIndicator.className = `status-indicator ${type}`;
     }
     
     playSuccessSound() {
-        // 创建简单的成功提示音
         try {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const oscillator = audioContext.createOscillator();
@@ -221,14 +961,45 @@ class FaceRecognitionUnlock {
         }
     }
     
+    clearStoredData() {
+        if (confirm('确定要清除所有录入的人脸数据吗？')) {
+            localStorage.removeItem('enrolledFaces');
+            this.enrolledFaces = [];
+            
+            // 如果有当前用户，也清除用户的人脸数据
+            if (this.currentUser) {
+                const data = this.storageManager.getData();
+                data.faceData = data.faceData.filter(f => f.userId !== this.currentUser.id);
+                this.storageManager.saveData(data);
+            }
+            
+            this.clearDataBtn.style.display = 'none';
+            this.showSuccess('数据清除成功', '所有人脸数据已清除');
+            setTimeout(() => {
+                this.reset();
+                this.switchMode('enroll');
+            }, 2000);
+        }
+    }
+    
     reset() {
-        this.isScanning = false;
-        this.faceDetectedCount = 0;
+        this.isProcessing = false;
+        this.currentStep = 1;
+        this.faceDescriptors = [];
+        this.lastBrightness = null;
         
         // 清理定时器
-        if (this.detectionInterval) {
-            clearInterval(this.detectionInterval);
-            this.detectionInterval = null;
+        if (this.enrollmentInterval) {
+            clearInterval(this.enrollmentInterval);
+            this.enrollmentInterval = null;
+        }
+        if (this.unlockInterval) {
+            clearInterval(this.unlockInterval);
+            this.unlockInterval = null;
+        }
+        if (this.stepTimeout) {
+            clearTimeout(this.stepTimeout);
+            this.stepTimeout = null;
         }
         
         // 停止摄像头
@@ -244,15 +1015,207 @@ class FaceRecognitionUnlock {
         this.startBtn.style.display = 'inline-flex';
         this.resetBtn.style.display = 'none';
         this.resultSection.style.display = 'none';
+        this.modeSelector.style.display = 'flex';
         
-        this.updateStatus('准备扫描', 'fas fa-camera');
+        this.updateStatus('准备开始', 'fas fa-camera');
+        this.updateStepIndicator();
     }
     
     destroy() {
         this.reset();
         // 清理事件监听器
-        this.startBtn.removeEventListener('click', this.startRecognition);
+        this.startBtn.removeEventListener('click', this.startProcess);
         this.resetBtn.removeEventListener('click', this.reset);
+        this.clearDataBtn.removeEventListener('click', this.clearStoredData);
+        this.enrollBtn.removeEventListener('click', () => this.switchMode('enroll'));
+        this.unlockBtn.removeEventListener('click', () => this.switchMode('unlock'));
+    }
+}
+
+class LocalStorageManager {
+    constructor() {
+        this.storageKey = 'faceRecognitionData';
+        this.initializeStorage();
+    }
+
+    initializeStorage() {
+        if (!localStorage.getItem(this.storageKey)) {
+            const initialData = {
+                users: [],
+                currentUser: null,
+                faceData: [],
+                verificationLogs: []
+            };
+            localStorage.setItem(this.storageKey, JSON.stringify(initialData));
+        }
+    }
+
+    getData() {
+        return JSON.parse(localStorage.getItem(this.storageKey));
+    }
+
+    saveData(data) {
+        localStorage.setItem(this.storageKey, JSON.stringify(data));
+    }
+
+    registerUser(username, email, password) {
+        const data = this.getData();
+        
+        // 检查用户是否已存在
+        const existingUser = data.users.find(u => u.username === username || u.email === email);
+        if (existingUser) {
+            return { error: '用户名或邮箱已存在' };
+        }
+
+        // 创建新用户
+        const newUser = {
+            id: Date.now(),
+            username,
+            email,
+            password: this.hashPassword(password),
+            createdAt: new Date().toISOString(),
+            isActive: true
+        };
+
+        data.users.push(newUser);
+        this.saveData(data);
+        
+        return { 
+            message: '用户注册成功',
+            user_id: newUser.id,
+            username: newUser.username
+        };
+    }
+
+    loginUser(username, password) {
+        const data = this.getData();
+        const hashedPassword = this.hashPassword(password);
+        
+        const user = data.users.find(u => 
+            u.username === username && u.password === hashedPassword && u.isActive
+        );
+
+        if (!user) {
+            return { error: '用户名或密码错误' };
+        }
+
+        // 设置当前用户
+        data.currentUser = {
+            id: user.id,
+            username: user.username,
+            email: user.email
+        };
+        this.saveData(data);
+
+        return {
+            message: '登录成功',
+            user: data.currentUser
+        };
+    }
+
+    enrollFace(userId, features, step) {
+        const data = this.getData();
+        
+        const faceRecord = {
+            id: Date.now(),
+            userId,
+            features,
+            step,
+            createdAt: new Date().toISOString()
+        };
+
+        data.faceData.push(faceRecord);
+        this.saveData(data);
+
+        return {
+            message: '人脸数据录入成功',
+            face_id: faceRecord.id,
+            step
+        };
+    }
+
+    verifyFace(userId, features) {
+        const data = this.getData();
+        
+        // 获取用户的人脸数据
+        const userFaceData = data.faceData.filter(f => f.userId === userId);
+        
+        if (userFaceData.length === 0) {
+            return { error: '未找到用户的人脸数据' };
+        }
+
+        // 计算相似度
+        let maxSimilarity = 0;
+        for (const faceRecord of userFaceData) {
+            const similarity = this.calculateSimilarity(features, faceRecord.features);
+            maxSimilarity = Math.max(maxSimilarity, similarity);
+        }
+
+        const threshold = 0.75;
+        const isMatch = maxSimilarity >= threshold;
+
+        // 记录验证日志
+        const logRecord = {
+            id: Date.now(),
+            userId,
+            type: 'face_unlock',
+            success: isMatch,
+            confidence: maxSimilarity,
+            timestamp: new Date().toISOString()
+        };
+        data.verificationLogs.push(logRecord);
+        this.saveData(data);
+
+        return {
+            success: isMatch,
+            confidence: Math.round(maxSimilarity * 10000) / 10000,
+            message: isMatch ? '验证成功' : '验证失败'
+        };
+    }
+
+    getCurrentUser() {
+        const data = this.getData();
+        return data.currentUser;
+    }
+
+    logout() {
+        const data = this.getData();
+        data.currentUser = null;
+        this.saveData(data);
+    }
+
+    hashPassword(password) {
+        // 简单的哈希函数（仅用于演示）
+        let hash = 0;
+        for (let i = 0; i < password.length; i++) {
+            const char = password.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // 转换为32位整数
+        }
+        return hash.toString();
+    }
+
+    calculateSimilarity(features1, features2) {
+        if (!features1 || !features2 || features1.length !== features2.length) {
+            return 0;
+        }
+
+        // 余弦相似度
+        let dotProduct = 0;
+        let norm1 = 0;
+        let norm2 = 0;
+
+        for (let i = 0; i < features1.length; i++) {
+            dotProduct += features1[i] * features2[i];
+            norm1 += features1[i] * features1[i];
+            norm2 += features2[i] * features2[i];
+        }
+
+        if (norm1 === 0 || norm2 === 0) {
+            return 0;
+        }
+
+        return Math.max(0, dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2)));
     }
 }
 
@@ -264,27 +1227,23 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
     }
     
-    // 使用简化的人脸检测方案，无需TensorFlow.js
-    
     // 初始化人脸识别系统
-    window.faceRecognitionUnlock = new FaceRecognitionUnlock();
+    window.faceRecognitionSystem = new FaceRecognitionSystem();
 });
 
 // 页面卸载时清理资源
 window.addEventListener('beforeunload', () => {
-    if (window.faceRecognitionUnlock) {
-        window.faceRecognitionUnlock.destroy();
+    if (window.faceRecognitionSystem) {
+        window.faceRecognitionSystem.destroy();
     }
 });
 
-// 添加一些实用工具函数
+// 实用工具函数
 const Utils = {
-    // 检测设备类型
     isMobile() {
         return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     },
     
-    // 检测浏览器类型
     getBrowser() {
         const userAgent = navigator.userAgent;
         if (userAgent.includes('Chrome')) return 'Chrome';
@@ -294,7 +1253,6 @@ const Utils = {
         return 'Unknown';
     },
     
-    // 格式化时间
     formatTime(date = new Date()) {
         return date.toLocaleTimeString('zh-CN', {
             hour12: false,
@@ -305,5 +1263,4 @@ const Utils = {
     }
 };
 
-// 导出工具函数到全局
 window.Utils = Utils;
