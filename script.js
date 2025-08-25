@@ -584,7 +584,7 @@ class FaceRecognitionSystem {
         this.updateHeadPoseHistory(headPose);
         
         // 检测眨眼
-        const eyeAspectRatio = this.calculateEyeAspectRatio(faceData.landmarks);
+        const eyeAspectRatio = this.calculateSimpleEyeAspectRatio(faceData);
         this.detectBlink(eyeAspectRatio);
         
         // 计算活体检测分数
@@ -800,24 +800,47 @@ class FaceRecognitionSystem {
         this.isProcessing = false;
         
         if (success) {
-            this.showSuccess('解锁成功', `身份验证通过 (置信度: ${(confidence * 100).toFixed(1)}%)`);
+            // 停止摄像头
+            if (this.stream) {
+                this.stream.getTracks().forEach(track => track.stop());
+                this.stream = null;
+            }
+            
+            // 显示成功提示
+            this.showSuccess('🎉 解锁成功！', `身份验证通过，欢迎回来！\n置信度: ${(confidence * 100).toFixed(1)}%`);
             this.playSuccessSound();
+            
+            // 添加成功动画效果
+            this.cameraContainer.style.transform = 'scale(1.05)';
+            this.cameraContainer.style.filter = 'brightness(1.2)';
+            
+            setTimeout(() => {
+                this.cameraContainer.style.transform = 'scale(1)';
+                this.cameraContainer.style.filter = 'brightness(1)';
+            }, 500);
+            
         } else {
-            this.showError('解锁失败', '身份验证失败，请重试');
+            this.showError('❌ 解锁失败', '身份验证失败，请重试');
         }
         
         setTimeout(() => {
             this.reset();
-        }, 3000);
+        }, 4000); // 延长显示时间
     }
     
     showSuccess(title, message) {
-        this.updateStatus('验证成功！', 'fas fa-check-circle', 'success');
+        this.updateStatus('🎉 验证成功！', 'fas fa-check-circle', 'success');
         this.resultSection.style.display = 'block';
         this.resultSection.className = 'result-section success';
         this.resultIcon.innerHTML = '<i class="fas fa-check-circle"></i>';
         this.resultTitle.textContent = title;
-        this.resultMessage.textContent = message;
+        this.resultMessage.innerHTML = message.replace(/\n/g, '<br>');
+        
+        // 添加成功动画
+        this.resultSection.style.animation = 'successSlideIn 0.5s ease-out';
+        
+        // 添加庆祝效果
+        this.createConfetti();
     }
     
     showError(title, message) {
@@ -857,6 +880,33 @@ class FaceRecognitionSystem {
             oscillator.stop(audioContext.currentTime + 0.3);
         } catch (error) {
             console.log('音频播放失败:', error);
+        }
+    }
+    
+    createConfetti() {
+        // 创建彩带效果
+        for (let i = 0; i < 50; i++) {
+            setTimeout(() => {
+                const confetti = document.createElement('div');
+                confetti.style.position = 'fixed';
+                confetti.style.left = Math.random() * 100 + 'vw';
+                confetti.style.top = '-10px';
+                confetti.style.width = '10px';
+                confetti.style.height = '10px';
+                confetti.style.backgroundColor = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#feca57'][Math.floor(Math.random() * 5)];
+                confetti.style.borderRadius = '50%';
+                confetti.style.pointerEvents = 'none';
+                confetti.style.zIndex = '9999';
+                confetti.style.animation = `confettiFall ${2 + Math.random() * 3}s linear forwards`;
+                
+                document.body.appendChild(confetti);
+                
+                setTimeout(() => {
+                    if (confetti.parentNode) {
+                        confetti.parentNode.removeChild(confetti);
+                    }
+                }, 5000);
+            }, i * 50);
         }
     }
     
