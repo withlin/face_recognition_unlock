@@ -84,20 +84,12 @@ class FaceRecognitionSystem {
         try {
             this.updateStatus('正在加载人脸检测模型...', 'fas fa-spinner fa-spin');
             
-            // Load MediaPipe Face Landmarks Detection model
-            this.faceDetector = await faceLandmarksDetection.load(
-                faceLandmarksDetection.SupportedPackages.mediaPipeFaceMesh,
-                {
-                    runtime: 'mediapipe',
-                    solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619',
-                    refineLandmarks: true,
-                    maxFaces: 1
-                }
-            );
+            // Load BlazeFace model
+            this.faceDetector = await blazeface.load();
             
             this.isModelLoaded = true;
             this.updateStatus('人脸检测模型加载完成', 'fas fa-check-circle', 'success');
-            console.log('MediaPipe Face Detection模型加载成功');
+            console.log('BlazeFace模型加载成功');
         } catch (error) {
             console.error('模型加载失败:', error);
             this.updateStatus('模型加载失败，请刷新页面重试', 'fas fa-exclamation-triangle', 'error');
@@ -282,26 +274,23 @@ class FaceRecognitionSystem {
         }
 
         try {
-            // 使用MediaPipe进行真实人脸检测
-            const predictions = await this.faceDetector.estimateFaces({
-                input: this.video,
-                returnTensors: false,
-                flipHorizontal: false,
-                predictIrises: true
-            });
+            // 使用BlazeFace进行人脸检测
+            const predictions = await this.faceDetector.estimateFaces(this.video, false);
             
             if (predictions && predictions.length > 0) {
                 const face = predictions[0];
                 
-                // 计算眼部纵横比用于眨眼检测
-                const eyeAspectRatio = this.calculateEyeAspectRatio(face.keypoints);
+                // 简化的眨眼检测（基于面部区域变化）
+                const eyeAspectRatio = this.calculateSimpleEyeAspectRatio(face);
                 this.detectBlink(eyeAspectRatio);
                 
                 return {
-                    confidence: face.faceInViewConfidence || 0.9,
-                    landmarks: face.keypoints,
-                    boundingBox: face.box,
-                    mesh: face.scaledMesh,
+                    confidence: face.probability || 0.9,
+                    landmarks: face.landmarks,
+                    boundingBox: {
+                        topLeft: face.topLeft,
+                        bottomRight: face.bottomRight
+                    },
                     eyeAspectRatio: eyeAspectRatio
                 };
             }
@@ -313,53 +302,37 @@ class FaceRecognitionSystem {
         }
     }
 
-    calculateEyeAspectRatio(keypoints) {
-        if (!keypoints || keypoints.length < 468) {
-            return 0;
+    calculateSimpleEyeAspectRatio(face) {
+        if (!face || !face.landmarks) {
+            return 0.3; // 默认值
         }
         
-        // 计算双眼的平均纵横比
-        const leftEAR = this.getEyeAspectRatio(keypoints, 'left');
-        const rightEAR = this.getEyeAspectRatio(keypoints, 'right');
+        // 使用BlazeFace的6个关键点进行简化的眨眼检测
+        // landmarks: [右眼, 左眼, 鼻尖, 嘴巴, 右耳, 左耳]
+        const landmarks = face.landmarks;
+        if (landmarks.length >= 6) {
+            const rightEye = landmarks[0];
+            const leftEye = landmarks[1];
+            const nose = landmarks[2];
+            
+            // 计算眼睛到鼻子的距离比例作为简化的EAR
+            const rightEyeToNose = Math.sqrt(
+                Math.pow(rightEye[0] - nose[0], 2) + Math.pow(rightEye[1] - nose[1], 2)
+            );
+            const leftEyeToNose = Math.sqrt(
+                Math.pow(leftEye[0] - nose[0], 2) + Math.pow(leftEye[1] - nose[1], 2)
+            );
+            const eyeDistance = Math.sqrt(
+                Math.pow(rightEye[0] - leftEye[0], 2) + Math.pow(rightEye[1] - leftEye[1], 2)
+            );
+            
+            return (rightEyeToNose + leftEyeToNose) / (2 * eyeDistance);
+        }
         
-        return (leftEAR + rightEAR) / 2;
+        return 0.3;
     }
 
-    getEyeAspectRatio(keypoints, eye) {
-        // MediaPipe 468点模型的眼部关键点索引
-        let eyePoints;
-        
-        if (eye === 'left') {
-            // 左眼关键点 (从用户视角)
-            eyePoints = {
-                outer: keypoints[33],   // 外眼角
-                inner: keypoints[133],  // 内眼角
-                top1: keypoints[159],   // 上眼睑点1
-                top2: keypoints[158],   // 上眼睑点2
-                bottom1: keypoints[145], // 下眼睑点1
-                bottom2: keypoints[153]  // 下眼睑点2
-            };
-        } else {
-            // 右眼关键点 (从用户视角)
-            eyePoints = {
-                outer: keypoints[362],  // 外眼角
-                inner: keypoints[263],  // 内眼角
-                top1: keypoints[386],   // 上眼睑点1
-                top2: keypoints[385],   // 上眼睑点2
-                bottom1: keypoints[374], // 下眼睑点1
-                bottom2: keypoints[380]  // 下眼睑点2
-            };
-        }
-        
-        // 计算眼睛纵横比: EAR = (|p2-p6| + |p3-p5|) / (2 * |p1-p4|)
-        const vertical1 = this.euclideanDistance(eyePoints.top1, eyePoints.bottom1);
-        const vertical2 = this.euclideanDistance(eyePoints.top2, eyePoints.bottom2);
-        const horizontal = this.euclideanDistance(eyePoints.outer, eyePoints.inner);
-        
-        if (horizontal === 0) return 0;
-        
-        return (vertical1 + vertical2) / (2 * horizontal);
-    }
+    // 移除了复杂的MediaPipe眼部纵横比计算，改用简化版本
     
     euclideanDistance(point1, point2) {
         if (!point1 || !point2) return 0;
@@ -445,132 +418,56 @@ class FaceRecognitionSystem {
         
         try {
             const landmarks = faceData.landmarks;
-            const features = [];
+            const boundingBox = faceData.boundingBox;
             
-            // 提取关键面部特征点的相对位置
-            const faceCenter = this.calculateFaceCenter(landmarks);
+            // BlazeFace提供6个关键点: [右眼, 左眼, 鼻尖, 嘴巴, 右耳, 左耳]
+            if (landmarks.length < 6) {
+                return null;
+            }
             
-            // 重要面部特征点索引（MediaPipe 468点模型）
-            const keyPoints = {
-                leftEye: [33, 7, 163, 144, 145, 153],
-                rightEye: [362, 382, 381, 380, 374, 373],
-                nose: [1, 2, 5, 4, 6, 19, 20, 94, 125],
-                mouth: [61, 84, 17, 314, 405, 320, 307, 375, 321, 308],
-                jawline: [172, 136, 150, 149, 176, 148, 152, 377, 400, 378, 379, 365, 397, 288, 361, 323]
-            };
+            const [rightEye, leftEye, nose, mouth, rightEar, leftEar] = landmarks;
             
-            // 计算各个特征区域的几何特征
-            Object.keys(keyPoints).forEach(region => {
-                const regionFeatures = this.calculateRegionFeatures(landmarks, keyPoints[region], faceCenter);
-                features.push(...regionFeatures);
-            });
+            // 计算面部几何特征
+            const eyeDistance = Math.sqrt(
+                Math.pow(rightEye[0] - leftEye[0], 2) + Math.pow(rightEye[1] - leftEye[1], 2)
+            );
             
-            // 计算面部比例特征
-            const proportionFeatures = this.calculateFaceProportions(landmarks);
-            features.push(...proportionFeatures);
+            const eyeToNoseDistance = Math.sqrt(
+                Math.pow((rightEye[0] + leftEye[0]) / 2 - nose[0], 2) + 
+                Math.pow((rightEye[1] + leftEye[1]) / 2 - nose[1], 2)
+            );
             
-            // 归一化特征向量
-            return this.normalizeFeatures(features);
+            const noseToMouthDistance = Math.sqrt(
+                Math.pow(nose[0] - mouth[0], 2) + Math.pow(nose[1] - mouth[1], 2)
+            );
+            
+            const faceWidth = boundingBox.bottomRight[0] - boundingBox.topLeft[0];
+            const faceHeight = boundingBox.bottomRight[1] - boundingBox.topLeft[1];
+            
+            // 计算相对位置特征（归一化到面部尺寸）
+            const features = [
+                eyeDistance / faceWidth,
+                eyeToNoseDistance / faceHeight,
+                noseToMouthDistance / faceHeight,
+                faceWidth / faceHeight, // 面部宽高比
+                (rightEye[0] - boundingBox.topLeft[0]) / faceWidth, // 右眼相对位置
+                (rightEye[1] - boundingBox.topLeft[1]) / faceHeight,
+                (leftEye[0] - boundingBox.topLeft[0]) / faceWidth, // 左眼相对位置
+                (leftEye[1] - boundingBox.topLeft[1]) / faceHeight,
+                (nose[0] - boundingBox.topLeft[0]) / faceWidth, // 鼻子相对位置
+                (nose[1] - boundingBox.topLeft[1]) / faceHeight,
+                (mouth[0] - boundingBox.topLeft[0]) / faceWidth, // 嘴巴相对位置
+                (mouth[1] - boundingBox.topLeft[1]) / faceHeight
+            ];
+            
+            return features;
         } catch (error) {
             console.error('特征提取错误:', error);
             return null;
         }
     }
 
-    calculateFaceCenter(landmarks) {
-        let sumX = 0, sumY = 0;
-        landmarks.forEach(point => {
-            sumX += point.x;
-            sumY += point.y;
-        });
-        return {
-            x: sumX / landmarks.length,
-            y: sumY / landmarks.length
-        };
-    }
-
-    calculateRegionFeatures(landmarks, indices, faceCenter) {
-        const features = [];
-        
-        // 计算区域中心点
-        let regionCenterX = 0, regionCenterY = 0;
-        indices.forEach(idx => {
-            regionCenterX += landmarks[idx].x;
-            regionCenterY += landmarks[idx].y;
-        });
-        regionCenterX /= indices.length;
-        regionCenterY /= indices.length;
-        
-        // 相对于面部中心的位置
-        features.push((regionCenterX - faceCenter.x) / 100);
-        features.push((regionCenterY - faceCenter.y) / 100);
-        
-        // 区域内点的分散度
-        let variance = 0;
-        indices.forEach(idx => {
-            const dx = landmarks[idx].x - regionCenterX;
-            const dy = landmarks[idx].y - regionCenterY;
-            variance += dx * dx + dy * dy;
-        });
-        features.push(Math.sqrt(variance / indices.length) / 10);
-        
-        return features;
-    }
-
-    calculateFaceProportions(landmarks) {
-        const features = [];
-        
-        // 眼间距
-        const leftEyeCenter = landmarks[33];
-        const rightEyeCenter = landmarks[362];
-        const eyeDistance = Math.sqrt(
-            Math.pow(rightEyeCenter.x - leftEyeCenter.x, 2) + 
-            Math.pow(rightEyeCenter.y - leftEyeCenter.y, 2)
-        );
-        
-        // 鼻子长度
-        const noseTip = landmarks[1];
-        const noseBridge = landmarks[6];
-        const noseLength = Math.sqrt(
-            Math.pow(noseTip.x - noseBridge.x, 2) + 
-            Math.pow(noseTip.y - noseBridge.y, 2)
-        );
-        
-        // 嘴巴宽度
-        const leftMouth = landmarks[61];
-        const rightMouth = landmarks[291];
-        const mouthWidth = Math.sqrt(
-            Math.pow(rightMouth.x - leftMouth.x, 2) + 
-            Math.pow(rightMouth.y - leftMouth.y, 2)
-        );
-        
-        // 面部高度
-        const forehead = landmarks[10];
-        const chin = landmarks[152];
-        const faceHeight = Math.sqrt(
-            Math.pow(chin.x - forehead.x, 2) + 
-            Math.pow(chin.y - forehead.y, 2)
-        );
-        
-        // 计算比例特征
-        features.push(eyeDistance / faceHeight);
-        features.push(noseLength / faceHeight);
-        features.push(mouthWidth / faceHeight);
-        features.push(eyeDistance / mouthWidth);
-        
-        return features;
-    }
-
-    normalizeFeatures(features) {
-        // 简单的特征归一化
-        const mean = features.reduce((sum, val) => sum + val, 0) / features.length;
-        const variance = features.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / features.length;
-        const stdDev = Math.sqrt(variance);
-        
-        if (stdDev === 0) return features;
-        
-        return features.map(val => (val - mean) / stdDev);
-    }
+    // 移除了不再使用的MediaPipe相关辅助方法
     
     isStepCompleted() {
         const requiredSamples = 10;
@@ -701,23 +598,25 @@ class FaceRecognitionSystem {
     }
     
     calculateHeadPose(landmarks) {
-        // 使用关键点计算头部姿态
-        const noseTip = landmarks[1];
-        const leftEye = landmarks[33];
-        const rightEye = landmarks[362];
-        const chin = landmarks[152];
+        if (!landmarks || landmarks.length < 6) {
+            return { pitch: 0, yaw: 0, roll: 0 };
+        }
         
-        // 计算头部倾斜角度
-        const eyeCenter = {
-            x: (leftEye.x + rightEye.x) / 2,
-            y: (leftEye.y + rightEye.y) / 2
-        };
+        // BlazeFace关键点: [右眼, 左眼, 鼻尖, 嘴巴, 右耳, 左耳]
+        const [rightEye, leftEye, nose, mouth] = landmarks;
         
-        const roll = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x) * 180 / Math.PI;
-        const yaw = Math.atan2(noseTip.x - eyeCenter.x, eyeCenter.y - noseTip.y) * 180 / Math.PI;
-        const pitch = Math.atan2(chin.y - eyeCenter.y, Math.abs(chin.x - eyeCenter.x)) * 180 / Math.PI;
+        // 计算偏航角 (Yaw) - 左右转头
+        const eyeCenterX = (leftEye[0] + rightEye[0]) / 2;
+        const yaw = Math.atan2(nose[0] - eyeCenterX, 100) * 180 / Math.PI;
         
-        return { roll, yaw, pitch };
+        // 计算俯仰角 (Pitch) - 上下点头
+        const eyeCenterY = (leftEye[1] + rightEye[1]) / 2;
+        const pitch = Math.atan2(mouth[1] - eyeCenterY, nose[1] - eyeCenterY) * 180 / Math.PI;
+        
+        // 计算翻滚角 (Roll) - 左右倾斜
+        const roll = Math.atan2(rightEye[1] - leftEye[1], rightEye[0] - leftEye[0]) * 180 / Math.PI;
+        
+        return { pitch, yaw, roll };
     }
     
     updateHeadPoseHistory(headPose) {
